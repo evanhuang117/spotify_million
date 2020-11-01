@@ -7,31 +7,42 @@ import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import re
 import matplotlib.pyplot as plt
-
+import requests
+MAX_RETRIES = 5
+EXPORT_DIR = 'playlist_frames/'
+DATA_DIR = 'spotify_million_playlist_dataset/data/'
 
 def main():
-    # authorize the user
+    # authorization
     auth_manager = SpotifyClientCredentials()
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    data_dir = 'spotify_million_playlist_dataset/data/'
     playlists = []
-    for file in sorted(os.scandir(data_dir), key=lambda e: e.name):
-        print("processing slice: " + str(file))
+    for file in sorted(os.scandir(DATA_DIR), key=lambda e: e.name):
+        print("processing slice: " + str(file.name))
         data = json.load(open(file.path))
         playlists.append(pd.DataFrame(data['playlists']))
         break
 
     # combine all of the playlists into a single dataframe
     playlists_frame = pd.concat(playlists)
-    # print head of playlists dataframe
     print(playlists_frame.head())
     for i, playlist in playlists_frame.iterrows():
-        print(playlist['name'])
+        print('analyzing: ' + playlist['name'])
         # processSongFeatures(playlist, sp)
-        processAnalyses(playlist, sp)
+        # processAnalyses(playlist, sp, EXPORT_DIR)
         break
-    # print(json_frames[0].iloc[0].loc['tracks'])
+
+    # load dataframes
+    for file in sorted(os.scandir(EXPORT_DIR), key=lambda e: e.name):
+        print('loading: ' + str(file.name))
+        df = pd.read_csv(file, header=[0,1], index_col=0, low_memory=False)
+
+    print(df['Unnamed: 1_level_0'].index)
+    print(df.groupby(df['Unnamed: 1_level_0'].index).head())
+    group = df.groupby(level=0).get_group('bars')
+    print(group.columns.levels)
+    #plt.scatter(x=df.groupby('track'))
 
 
 def processNamesAndIds(playlist, sp):
@@ -79,26 +90,32 @@ def processSongFeatures(playlist, sp):
     features_by_id.to_csv(export_dir + '/features.csv')"""
 
 
-# this function creates a multi-index dataframe
+# this function creates a multi-index dataframe and exports it to csv
 # - level 1 is the category of the analysis
 # - level 2 is the song id for the data
 
-def processAnalyses(playlist, sp):
+def processAnalyses(playlist, sp, path):
     # get the songs from the first playlist
     songs = playlist['tracks']
 
     analyses = {}
     # collect analyses of songs, dict of (song id : analysis)
-    # pd.set_option('display.max_columns', None)
     for i, song in enumerate(songs):
         song_id = re.sub('spotify:track:', '', song['track_uri'])
-        print('analyzing: ' + song['track_name'])
-        a = sp.audio_analysis(track_id=song_id)
+        # sometimes the api request times out, we'll skip the song if it exceeds the max retries
+        for request_attempt in range(MAX_RETRIES):
+            print('analyzing: ' + song['track_name'])
+            try:
+                a = sp.audio_analysis(track_id=song_id)
+            except requests.exceptions.ReadTimeout as rto:
+                print('request to Spotify timed out for: ' + song['track_name'])
+            else:
+                break
+        else:
+            continue
         # remove some useless crap
         a.pop('meta')
         analyses[song_id] = a
-        break
-    #track_frame = pd.DataFrame(track_frame.values(), index=track_frame.keys())
 
     ids = []
     category_frames = {}
@@ -115,20 +132,21 @@ def processAnalyses(playlist, sp):
             # add the new analysis data for the category
             val_list.append(norm)
             category_frames[category] = val_list
-            print(norm)
 
     # song_analyses_frame maps a song to a dataframe containing a
     # categorized analysis of the song
     song_analyses_frame = {}
     for cat_name, analysis_data_by_song in category_frames.items():
+        print('combining analysis category: ' + cat_name)
+        # data is a DataFrame of the data of a songs analysis for the current category
         for i, data in enumerate(analysis_data_by_song):
+            print('combining data for: ' + str(ids[i]))
             # get analysis dict for the current song
             analysis = song_analyses_frame.get(ids[i], {})
             # create a new analysis category and its data
             analysis[cat_name] = data
             # add/update the dict with the song's new analysis
             song_analyses_frame[ids[i]] = analysis
-
 
     category_tables = {}
     # concatenate the list of frames in each category to make tables based on song id
@@ -137,24 +155,30 @@ def processAnalyses(playlist, sp):
 
     # combine the dictionary of categories and their lists of songs
     category_tables_frame = pd.concat(category_tables.values(), keys=category_tables.keys())
-    category_tables_frame.to_html('frames.html')
-    print(category_tables_frame.groupby(level=1).first())
+    #category_tables_frame.to_html('frames.html')
 
     # export the data
-    """export_dir = playlist['name'] + '-' + playlist['id']
+    file_name = playlist['pid']
+    category_tables_frame.to_csv(path + str(file_name) + '.csv')
+
+    # enable to export individual tables for each category, grouped by song
+    # not really needed if you use groupby
+    """
+    export_dir = playlist['name'] + '-' + playlist['pid']
     if not os.path.isdir(export_dir):
         os.mkdir(export_dir)
-
+        
     print(category_tables.keys())
     for category, table in category_tables.items():
         print(category)
         idx = pd.IndexSlice
-        table.to_csv(export_dir + '/' + category + '.csv')
-        #print(table.loc[idx['4W8iitrK5csxU1kqBeT5Js']])
+        table.to_csv(export_dir + '/' + category + '.csv')"""
 
-    category_tables_frame.to_csv(export_dir + '/analysis_category_tables.csv')
-    """
 
+def batch(item_list, batch_size=1):
+    l = len(item_list)
+    for ndx in range(0, l, batch_size):
+        yield item_list[ndx:min(ndx + batch_size, l)]
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
